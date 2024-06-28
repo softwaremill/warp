@@ -5,6 +5,12 @@ import java.util.concurrent.{CompletableFuture, Semaphore}
 import scala.concurrent.ExecutionException
 import scala.util.control.NonFatal
 
+/** Implicit evidence that given block of code will be evaluated in a forked scope on a separate thread and therefore that capture of
+  * `scala.util.boundary.Label` instances is unsafe.
+  */
+private[ox] sealed abstract class Forked
+private[ox] case object ForkedEvidence extends Forked
+
 /** Starts a fork (logical thread of execution), which is guaranteed to complete before the enclosing [[supervised]] or [[supervisedError]]
   * block completes.
   *
@@ -18,7 +24,7 @@ import scala.util.control.NonFatal
   * For alternate behaviors regarding ending the scope, see [[forkUser]], [[forkError]], [[forkUserError]], [[forkCancellable]] and
   * [[forkUnsupervised]].
   */
-def fork[T](f: => T)(using Ox): Fork[T] = forkError(using summon[Ox].asNoErrorMode)(f)
+def fork[T](f: Forked ?=> T)(using Ox): Fork[T] = forkError(using summon[Ox].asNoErrorMode)(f)
 
 /** Starts a fork (logical thread of execution), which is guaranteed to complete before the enclosing [[supervisedError]] block completes.
   *
@@ -30,13 +36,14 @@ def fork[T](f: => T)(using Ox): Fork[T] = forkError(using summon[Ox].asNoErrorMo
   * enclosing scope. If the [[ErrorMode]] provided when creating the scope using [[supervisedError]] classifies a fork return value as an
   * error, the scope ends (cancelling all other running forks).
   */
-def forkError[E, F[_], T](using OxError[E, F])(f: => F[T]): Fork[T] =
+def forkError[E, F[_], T](using OxError[E, F])(f: Forked ?=> F[T]): Fork[T] =
   val oxError = summon[OxError[E, F]]
   // the separate result future is needed to wait for the result, as there's no .join on individual tasks (only whole scopes can be joined)
   val result = new CompletableFuture[T]()
   oxError.scope.fork { () =>
     val supervisor = oxError.supervisor
     try
+      given Forked = ForkedEvidence
       val resultOrError = f
       val errorMode = oxError.errorMode
       if errorMode.isError(resultOrError) then
@@ -63,7 +70,7 @@ def forkError[E, F[_], T](using OxError[E, F])(f: => F[T]): Fork[T] =
   *
   * For alternate behaviors, see [[fork]], [[forkError]], [[forkUserError]], [[forkCancellable]] and [[forkUnsupervised]].
   */
-def forkUser[T](f: => T)(using Ox): Fork[T] = forkUserError(using summon[Ox].asNoErrorMode)(f)
+def forkUser[T](f: Forked ?=> T)(using Ox): Fork[T] = forkUserError(using summon[Ox].asNoErrorMode)(f)
 
 /** Starts a fork (logical thread of execution), which is guaranteed to complete before the enclosing [[supervisedError]] block completes.
   *
@@ -75,13 +82,14 @@ def forkUser[T](f: => T)(using Ox): Fork[T] = forkUserError(using summon[Ox].asN
   * enclosing scope. If the [[ErrorMode]] provided when creating the scope using [[supervisedError]] classifies a fork return value as an
   * error, the scope ends (cancelling all other running forks).
   */
-def forkUserError[E, F[_], T](using OxError[E, F])(f: => F[T]): Fork[T] =
+def forkUserError[E, F[_], T](using OxError[E, F])(f: Forked ?=> F[T]): Fork[T] =
   val oxError = summon[OxError[E, F]]
   val result = new CompletableFuture[T]()
   oxError.supervisor.forkStarts()
   oxError.scope.fork { () =>
     val supervisor = oxError.supervisor.asInstanceOf[DefaultSupervisor[E]]
     try
+      given Forked = ForkedEvidence
       val resultOrError = f
       val errorMode = oxError.errorMode
       if errorMode.isError(resultOrError) then
@@ -105,9 +113,10 @@ def forkUserError[E, F[_], T](using OxError[E, F])(f: => F[T]): Fork[T] =
   *
   * For alternate behaviors, see [[fork]], [[forkUser]] and [[forkCancellable]].
   */
-def forkUnsupervised[T](f: => T)(using OxUnsupervised): Fork[T] =
+def forkUnsupervised[T](f: Forked ?=> T)(using OxUnsupervised): Fork[T] =
   val result = new CompletableFuture[T]()
   summon[OxUnsupervised].scope.fork { () =>
+    given Forked = ForkedEvidence
     try result.complete(f)
     catch case e: Throwable => result.completeExceptionally(e)
   }
@@ -118,7 +127,7 @@ def forkUnsupervised[T](f: => T)(using OxUnsupervised): Fork[T] =
   *
   * If ran in a [[supervised]] scope, all forks behave as daemon threads (see [[fork]] for details).
   */
-def forkAll[T](fs: Seq[() => T])(using Ox): Fork[Seq[T]] =
+def forkAll[T](fs: Seq[Forked ?=> () => T])(using Ox): Fork[Seq[T]] =
   val forks = fs.map(f => fork(f()))
   new Fork[Seq[T]]:
     override def join(): Seq[T] = forks.map(_.join())
@@ -136,7 +145,7 @@ def forkAll[T](fs: Seq[() => T])(using Ox): Fork[Seq[T]] =
   * Implementation note: a cancellable fork is created by starting a nested scope in a fork, and then starting a fork there. Hence, it is
   * more expensive than [[fork]], as two virtual threads are started.
   */
-def forkCancellable[T](f: => T)(using OxUnsupervised): CancellableFork[T] =
+def forkCancellable[T](f: Forked ?=> T)(using OxUnsupervised): CancellableFork[T] =
   val result = new CompletableFuture[T]()
   // forks can be never run, if they are cancelled immediately - we need to detect this, not to await on result.get()
   val started = new AtomicBoolean(false)
@@ -149,7 +158,9 @@ def forkCancellable[T](f: => T)(using OxUnsupervised): CancellableFork[T] =
       nestedOx.scope.fork { () =>
         // "else" means that the fork is already cancelled, so doing nothing in that case
         if !started.getAndSet(true) then
-          try result.complete(f).discard
+          try
+            given Forked = ForkedEvidence
+            result.complete(f).discard
           catch case e: Throwable => result.completeExceptionally(e).discard
 
         done.release() // the nested scope can now finish

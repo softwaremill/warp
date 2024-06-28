@@ -3,6 +3,17 @@ package ox
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
 import scala.reflect.ClassTag
+import scala.util.NotGiven
+import scala.util.boundary.Label
+
+sealed abstract class Supervised
+object SupervisedEvidence extends Supervised
+
+private inline def availableInScope[A]: Boolean =
+  compiletime.summonFrom {
+    case _: NotGiven[A] => false
+    case _: A           => true
+  }
 
 /** Starts a new concurrency scope, which allows starting forks in the given code block `f`. Forks can be started using [[fork]],
   * [[forkUser]], [[forkCancellable]] and [[forkUnsupervised]]. All forks are guaranteed to complete before this scope completes.
@@ -24,7 +35,19 @@ import scala.reflect.ClassTag
   * @see
   *   [[supervisedError]] Starts a scope in supervised mode, with the additional ability to report application errors
   */
-def supervised[T](f: Ox ?=> T): T = supervisedError(NoErrorMode)(f)
+inline def supervised[T](f: Supervised ?=> Ox ?=> T): T =
+  inline if availableInScope[Label[Either[Nothing, Nothing]]] && availableInScope[Forked] then
+    compiletime.error(
+      "Nesting supervised scopes along with fork and either blocks is disallowed to prevent unsafe .ok() combinator usage on forks."
+    )
+  else supervisedErrorInternal(NoErrorMode)(f)
+
+inline def supervisedError[E, F[_], T](em: ErrorMode[E, F])(f: Supervised ?=> OxError[E, F] ?=> F[T]): F[T] =
+  inline if availableInScope[Label[Either[Nothing, Nothing]]] && availableInScope[Forked] then
+    compiletime.error(
+      "Nesting supervised scopes along with fork and either blocks is disallowed to prevent unsafe .ok() combinator usage on forks."
+    )
+  else supervisedErrorInternal(em)(f)
 
 /** Starts a new concurrency scope, which allows starting forks in the given code block `f`. Forks can be started using [[fork]],
   * [[forkError]], [[forkUser]], [[forkUserError]], [[forkCancellable]] and [[forkUnsupervised]]. All forks are guaranteed to complete
@@ -36,12 +59,12 @@ def supervised[T](f: Ox ?=> T): T = supervisedError(NoErrorMode)(f)
   * @see
   *   [[forkError]] On details how to use application errors.
   */
-def supervisedError[E, F[_], T](em: ErrorMode[E, F])(f: OxError[E, F] ?=> F[T]): F[T] =
+def supervisedErrorInternal[E, F[_], T](em: ErrorMode[E, F])(f: Supervised ?=> OxError[E, F] ?=> F[T]): F[T] =
   val s = DefaultSupervisor[E]
   val capability = OxError(s, em)
   try
     val scopeResult = scopedWithCapability(capability) {
-      val mainBodyFork = forkUserError(using capability)(f(using capability))
+      val mainBodyFork = forkUserError(using capability)(f(using SupervisedEvidence)(using capability))
       val supervisorResult = s.join() // might throw if any supervised fork threw
       if supervisorResult == ErrorModeSupervisorResult.Success then
         // if no exceptions, the main f-fork must be done by now
