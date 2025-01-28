@@ -61,7 +61,7 @@ lazy val kafka: Project = (project in file("kafka"))
   .settings(
     name := "kafka",
     libraryDependencies ++= Seq(
-      "org.apache.kafka" % "kafka-clients" % "3.8.0",
+      "org.apache.kafka" % "kafka-clients" % "3.8.1",
       slf4j,
       logback % Test,
       "io.github.embeddedkafka" %% "embedded-kafka" % "3.9.0" % Test,
