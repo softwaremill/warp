@@ -36,7 +36,7 @@ lazy val core: Project = (project in file("core"))
   .settings(
     name := "core",
     libraryDependencies ++= Seq(
-      "com.softwaremill.jox" % "channels" % "0.3.1",
+      "com.softwaremill.jox" % "channels" % "0.4.0",
       scalaTest,
       "org.apache.pekko" %% "pekko-stream" % "1.1.2" % Test,
       "org.reactivestreams" % "reactive-streams-tck-flow" % "1.0.4" % Test
